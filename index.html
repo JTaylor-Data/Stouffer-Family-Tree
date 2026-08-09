@@ -28329,7 +28329,7 @@ async function colourCodeCell(rowNum, code){
   if(gid == null) return;
   try{
     await api(':batchUpdate', {method:'POST', body:{requests:[{repeatCell:{
-      range:{sheetId:gid, startRowIndex:rowNum-1, endRowIndex:rowNum, startColumnIndex:0, endColumnIndex:1},
+      range:{sheetId:gid, startRowIndex:rowNum-1, endRowIndex:rowNum, startColumnIndex:1, endColumnIndex:2},
       cell:{userEnteredFormat:{backgroundColor:fill}},
       fields:'userEnteredFormat.backgroundColor'
     }}]}});
