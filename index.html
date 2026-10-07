@@ -341,6 +341,7 @@
 </style>
 </head>
 <body>
+
 <div id="stage">
   <svg id="svg" aria-label="Family tree canvas">
     <g id="vp">
@@ -28119,7 +28120,8 @@ const SHEET_COLS = [
   ['last','Surname'], ['maiden','Maiden Name'], ['dob','Date of Birth'], ['pob','Place of Birth'],
   ['profession','Profession'], ['dom','Date of Marriage'], ['nchildren','# of Children'],
   ['dod','Date of Death'], ['pod','Place of Death'], ['burial','Burial Location'],
-  ['cause','Cause of Death'], ['viaCode','Via Spouse'], ['deleted','Deleted'], ['history','History']
+  ['cause','Cause of Death'], ['viaCode','Via Spouse'], ['deleted','Deleted'], ['history','History'],
+  ['sex','Sex']
 ];
 let COLIX = {}, NCOLS = 17;
 const normHead = s => String(s||'').toLowerCase().replace(/[^a-z0-9#]/g,'');
@@ -28133,7 +28135,7 @@ function mapHeader(header){
     if(ix >= 0) COLIX[k] = ix;
   });
   /* the original seventeen fall back to their usual slots; History is optional */
-  SHEET_COLS.forEach(([k], i) => { if(COLIX[k] == null && k !== 'history') COLIX[k] = i; });
+  SHEET_COLS.forEach(([k], i) => { if(COLIX[k] == null && k !== 'history' && k !== 'sex') COLIX[k] = i; });
   NCOLS = Math.max((header||[]).length, ...Object.keys(COLIX).map(k => COLIX[k] + 1));
 }
 const hasHistoryCol = () => COLIX.history != null;
@@ -28192,6 +28194,9 @@ function spouseCodeFor(partnerCode, order){
 const isTrue = v => /^(true|yes|y|1|x|✓)$/i.test(String(v||'').trim());
 
 /* ---------------- build the live tree out of sheet rows ---------------- */
+/* normalise a Sex cell: m/male->M, f/female->F, anything else->'' */
+const normSex = v => { const s = String(v||'').trim().toLowerCase();
+  return s === 'm' || s === 'male' ? 'M' : s === 'f' || s === 'female' ? 'F' : ''; };
 const refByCode = {};
 REF.people.forEach(x => { if(x.code) refByCode[x.code] = x; });
 
@@ -28206,7 +28211,7 @@ function buildFromSheet(rows){
       rec[k] = (ci == null) ? '' : String((r||[])[ci] == null ? '' : r[ci]).trim();
     });
     if(isTrue(rec.deleted)) return;
-    const anyValue = SHEET_COLS.some(([k]) => k !== 'deleted' && rec[k]);
+    const anyValue = SHEET_COLS.some(([k]) => k !== 'deleted' && k !== 'sex' && rec[k]);
     if(!anyValue) return;
     if(!rec.code){ uncoded.push(Object.assign({srcRow}, rec)); return; }
     if(!CODE_OK.test(rec.code)){ uncoded.push(Object.assign({srcRow, badCode:true}, rec)); return; }
@@ -28225,11 +28230,12 @@ function buildFromSheet(rows){
       _spouseOf: pc.spouse ? pc.partnerCode : null, _parentCode: pc.parentCode
     };
     if(person.placeholder) person.display = 'Unnamed · ' + rec.code;
-    /* sex: maiden name is the strongest signal the sheet carries; the reference
-       reading fills the rest where the code matches. */
-    if(rec.maiden && rec.maiden !== '---' && !/^none$/i.test(rec.maiden)) person.sex = 'F';
+    /* sex: explicit Sex column first; REF by code second; maiden inference last. */
+    const _sx = normSex(rec.sex);
+    if(_sx) person.sex = _sx;
+    else if(ref && ref.sex) person.sex = ref.sex;
+    else if(rec.maiden && rec.maiden !== '---' && !/^none$/i.test(rec.maiden)) person.sex = 'F';
     else if(rec.maiden === '---') person.sex = 'M';
-    if(person.sex === 'U' && ref && ref.sex) person.sex = ref.sex;
     const gsheet = parseInt(rec.generation, 10);
     if(gsheet && gsheet !== pc.depth) mismatch.push({code:rec.code, srcRow, sheet:gsheet, fromCode:pc.depth});
     byCodeMap[rec.code] = person;
@@ -28329,7 +28335,8 @@ async function colourCodeCell(rowNum, code){
   if(gid == null) return;
   try{
     await api(':batchUpdate', {method:'POST', body:{requests:[{repeatCell:{
-      range:{sheetId:gid, startRowIndex:rowNum-1, endRowIndex:rowNum, startColumnIndex:1, endColumnIndex:2},
+      range:{sheetId:gid, startRowIndex:rowNum-1, endRowIndex:rowNum,
+             startColumnIndex:1, endColumnIndex:2},
       cell:{userEnteredFormat:{backgroundColor:fill}},
       fields:'userEnteredFormat.backgroundColor'
     }}]}});
@@ -28371,11 +28378,27 @@ function sheetRowFor(p){
     let v;
     if(k === 'generation') v = p.gen || '';
     else if(k === 'deleted') v = '';
+    else if(k === 'sex') v = (p.sex === 'M' || p.sex === 'F') ? p.sex : '';
     else if(k === 'viaCode') v = p.viaCode || (p.via && byId[p.via] ? byId[p.via].code : '') || '';
     else v = p[k] == null ? '' : p[k];
     row[ci] = v;
   });
   return row;
+}
+/* build per-cell data for values:batchUpdate — writes only known columns, preserves others */
+function sheetBatchCells(rowNum, p){
+  const cells = [];
+  SHEET_COLS.forEach(([k]) => {
+    const ci = COLIX[k]; if(ci == null) return;
+    let v;
+    if(k === 'generation') v = p.gen || '';
+    else if(k === 'deleted') v = '';
+    else if(k === 'sex') v = (p.sex === 'M' || p.sex === 'F') ? p.sex : '';
+    else if(k === 'viaCode') v = p.viaCode || (p.via && byId[p.via] ? byId[p.via].code : '') || '';
+    else v = p[k] == null ? '' : p[k];
+    cells.push({range:"'" + CFG.tab + "'!" + COLA(ci) + rowNum, values:[[String(v)]]});
+  });
+  return cells;
 }
 async function sheetSetCell(rowNum, key, value){
   const ci = COLIX[key];
@@ -28393,18 +28416,23 @@ async function sheetAppend(p){
 }
 /* a row that already sits in the sheet without a code: fill it in place */
 async function sheetFillRow(rowNum, p){
-  const res = await api('/values/' + encodeURIComponent("'" + CFG.tab + "'!A" + rowNum + ':' + lastColLetter() + rowNum) +
-             '?valueInputOption=USER_ENTERED', {method:'PUT', body:{values:[sheetRowFor(p)]}});
+  const res = await api('/values:batchUpdate',
+    {method:'POST', body:{valueInputOption:'USER_ENTERED', data:sheetBatchCells(rowNum, p)}});
   await colourCodeCell(rowNum, p.code);
   return res;
 }
 async function sheetUpdate(p){
   if(!p.srcRow) throw new Error('That record has no row number in the sheet — reload before editing it.');
-  return api('/values/' + encodeURIComponent("'" + CFG.tab + "'!A" + p.srcRow + ':' + lastColLetter() + p.srcRow) +
-             '?valueInputOption=USER_ENTERED', {method:'PUT', body:{values:[sheetRowFor(p)]}});
+  return api('/values:batchUpdate',
+    {method:'POST', body:{valueInputOption:'USER_ENTERED', data:sheetBatchCells(p.srcRow, p)}});
 }
-async function sheetSoftDelete(p){
-  return sheetSetCell(p.srcRow, 'deleted', 'TRUE');
+async function sheetDeleteRow(p){
+  if(!p.srcRow) throw new Error('That record has no row number in the sheet — reload before editing it.');
+  const gid = await loadGridId();
+  if(gid == null) throw new Error('Could not determine sheet ID — reload and try again.');
+  return api(':batchUpdate', {method:'POST', body:{requests:[{
+    deleteDimension:{range:{sheetId:gid, dimension:'ROWS', startIndex:p.srcRow-1, endIndex:p.srcRow}}
+  }]}});
 }
 
 /* ============================ helpers ============================ */
@@ -29198,20 +29226,22 @@ function remove(p){
   if(p.children.length){ toast('Remove or reassign '+p.children.length+' child record(s) first'); return; }
   if(p.id === rootId){ toast('The first generation anchors the tree'); return; }
   if(mode === 'main'){
-    if(!confirm('Mark ' + (fullName(p) || p.display) + ' as deleted in the sheet?\n\nRow ' + p.srcRow +
-                ' stays in the spreadsheet with Deleted set to TRUE, so it can be brought back by clearing that cell.')) return;
-    sheetSoftDelete(p).then(() => {
+    if(!confirm('Permanently delete ' + (fullName(p) || p.display) + ' from the sheet?\n\nRow ' + p.srcRow +
+                ' will be removed entirely. This cannot be undone.')) return;
+    sheetDeleteRow(p).then(() => {
+      const deletedRow = p.srcRow;
       mainPeople = mainPeople.filter(x => x.id !== p.id);
       mainPeople.forEach(x => {
         x.spouses = x.spouses.filter(i => i !== p.id);
         x.children = x.children.filter(i => i !== p.id);
         x.parents = x.parents.filter(i => i !== p.id);
         if(x.via === p.id) x.via = '';
+        if(x.srcRow > deletedRow) x.srcRow--;
       });
       if(selected === p.id) selected = null;
       people = mainPeople; reindex(); closeDrawer();
       render(); apply(); buildFilterMenu(); buildLoose(); setBrand();
-      toast('Marked deleted in row ' + p.srcRow);
+      toast('Deleted row ' + deletedRow + ' from sheet');
     }).catch(e => toast(String(e.message || e)));
     return;
   }
@@ -29258,12 +29288,24 @@ document.getElementById('btn-gaps').onclick = () => {
         '<dt>Rows drawn</dt><dd>'+mainPeople.length+'</dd>'+
         '<dt>Rows skipped (no usable Code)</dt><dd>'+sheetUncoded.length+'</dd>'+
         '<dt>Last read</dt><dd>'+(sheetLoadedAt ? sheetLoadedAt.toLocaleString() : '—')+'</dd>'+
-        '<dt>Tab</dt><dd class="mono">'+esc(CFG.tab)+'</dd></dl>'+
+        '<dt>Tab</dt><dd class="mono">'+esc(CFG.tab)+'</dd>'+
+        '<dt>Sex column</dt><dd>'+(COLIX.sex != null ? 'found (column '+COLA(COLIX.sex)+')' : 'not found — sex inferred from Maiden Name')+'</dd></dl>'+
         '<p class="note" style="margin-top:12px">The tree is drawn only from rows that carry a Code. Relationships come from the code itself — drop the last segment for the parent, add 05 for a spouse — so nothing here is inferred from names.</p></div>';
     if(sheetGenMismatch.length){
       h += '<div class="sect"><h3>Generation column disagrees with the code ('+sheetGenMismatch.length+')</h3>'+
            sheetGenMismatch.slice(0,60).map(m => '<div class="listrow"><span class="mono">'+esc(m.code)+'</span><span>row '+m.srcRow+' says gen '+m.sheet+', the code says '+m.fromCode+'</span></div>').join('')+
            '<p class="note" style="margin-top:12px">The tree follows the code, since that is what positions the plaque. Worth fixing the Generation cell so the sheet reads straight.</p></div>';
+    }
+    const uSex = mainPeople.filter(x => x.sex === 'U' && !x.placeholder);
+    if(uSex.length){
+      h += '<div class="sect"><h3>Sex unrecorded (' + uSex.length + ')</h3>';
+      h += uSex.slice(0,60).map(x =>
+        '<div class="listrow"><button class="chip u" data-go="'+x.id+'">' + esc(shortName(x)) + '</button>'
+        +'<span class="mono" style="font-size:11px">' + esc(x.code) + '</span></div>'
+      ).join('');
+      if(uSex.length > 60) h += '<p class="note">…and ' + (uSex.length - 60) + ' more</p>';
+      h += '<p class="note" style="margin-top:12px">Add a <b>Sex</b> column to the sheet (values: M, F, or blank). '
+        + (COLIX.sex != null ? 'Sex column is present.' : 'No Sex column found — currently using Maiden Name as a proxy.') + '</p></div>';
     }
     h += '<div class="sect"><h3>How a code becomes a position</h3><dl class="kv">'+
          '<dt class="mono">1</dt><dd>the first Abraham</dd>'+
@@ -29403,7 +29445,7 @@ function codeRowDialog(r){
     code:(guess && guess.code) || '', first:r.first, middle:r.middle, last:r.last, maiden:r.maiden,
     dob:r.dob, dod:r.dod, pob:r.pob, pod:r.pod, dom:r.dom, nchildren:r.nchildren,
     profession:r.profession, burial:r.burial, cause:r.cause,
-    sex:(guess && guess.sex) || (r.maiden && r.maiden !== '---' ? 'F' : r.maiden === '---' ? 'M' : 'U'),
+    sex:(guess && guess.sex) || normSex(r.sex) || (r.maiden && r.maiden !== '---' ? 'F' : r.maiden === '---' ? 'M' : 'U'),
     parents:[], spouses:[], via:'', placeholder:false, skip:0
   }, {
     existingRow: r.srcRow, fromList: true, viaCode: r.viaCode || '',
