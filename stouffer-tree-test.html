@@ -28426,8 +28426,13 @@ async function sheetUpdate(p){
   return api('/values:batchUpdate',
     {method:'POST', body:{valueInputOption:'USER_ENTERED', data:sheetBatchCells(p.srcRow, p)}});
 }
-async function sheetSoftDelete(p){
-  return sheetSetCell(p.srcRow, 'deleted', 'TRUE');
+async function sheetDeleteRow(p){
+  if(!p.srcRow) throw new Error('That record has no row number in the sheet — reload before editing it.');
+  const gid = await loadGridId();
+  if(gid == null) throw new Error('Could not determine sheet ID — reload and try again.');
+  return api(':batchUpdate', {method:'POST', body:{requests:[{
+    deleteDimension:{range:{sheetId:gid, dimension:'ROWS', startIndex:p.srcRow-1, endIndex:p.srcRow}}
+  }]}});
 }
 
 /* ============================ helpers ============================ */
@@ -29221,20 +29226,22 @@ function remove(p){
   if(p.children.length){ toast('Remove or reassign '+p.children.length+' child record(s) first'); return; }
   if(p.id === rootId){ toast('The first generation anchors the tree'); return; }
   if(mode === 'main'){
-    if(!confirm('Mark ' + (fullName(p) || p.display) + ' as deleted in the sheet?\n\nRow ' + p.srcRow +
-                ' stays in the spreadsheet with Deleted set to TRUE, so it can be brought back by clearing that cell.')) return;
-    sheetSoftDelete(p).then(() => {
+    if(!confirm('Permanently delete ' + (fullName(p) || p.display) + ' from the sheet?\n\nRow ' + p.srcRow +
+                ' will be removed entirely. This cannot be undone.')) return;
+    sheetDeleteRow(p).then(() => {
+      const deletedRow = p.srcRow;
       mainPeople = mainPeople.filter(x => x.id !== p.id);
       mainPeople.forEach(x => {
         x.spouses = x.spouses.filter(i => i !== p.id);
         x.children = x.children.filter(i => i !== p.id);
         x.parents = x.parents.filter(i => i !== p.id);
         if(x.via === p.id) x.via = '';
+        if(x.srcRow > deletedRow) x.srcRow--;
       });
       if(selected === p.id) selected = null;
       people = mainPeople; reindex(); closeDrawer();
       render(); apply(); buildFilterMenu(); buildLoose(); setBrand();
-      toast('Marked deleted in row ' + p.srcRow);
+      toast('Deleted row ' + deletedRow + ' from sheet');
     }).catch(e => toast(String(e.message || e)));
     return;
   }
