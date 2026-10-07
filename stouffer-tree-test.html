@@ -28336,7 +28336,7 @@ async function colourCodeCell(rowNum, code){
   try{
     await api(':batchUpdate', {method:'POST', body:{requests:[{repeatCell:{
       range:{sheetId:gid, startRowIndex:rowNum-1, endRowIndex:rowNum,
-             startColumnIndex:COLIX['code']??0, endColumnIndex:(COLIX['code']??0)+1},
+             startColumnIndex:1, endColumnIndex:2},
       cell:{userEnteredFormat:{backgroundColor:fill}},
       fields:'userEnteredFormat.backgroundColor'
     }}]}});
